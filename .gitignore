@@ -1,0 +1,17 @@
+# Ignore virtual environments
+my-venv-upscale/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore logs
+logs/
+logs-WGAN/
+
+# Ignore model checkpoints (if large)
+checkpoints/
+
+# Ignore dataset (if too large or available elsewhere)
+dataset/
