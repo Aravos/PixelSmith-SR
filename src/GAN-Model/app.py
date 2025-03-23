@@ -185,8 +185,8 @@ def main():
             index=0
         )
 
-        sharpen = st.checkbox("Sharpen Image?", value=False)
-        color_boost = st.checkbox("Color Saturation Boost?", value=False)
+        sharpen = st.checkbox("Sharpen Image", value=False)
+        color_boost = st.checkbox("Color Saturation Boost", value=False)
 
         if st.button("Upscale & Post-Process"):
             with st.spinner("Upscaling..."):
