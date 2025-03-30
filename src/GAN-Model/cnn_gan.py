@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from torchinfo import summary
 
 class Discriminator(nn.Module):
     def __init__(self, channels_img, features_d):
@@ -76,3 +76,12 @@ def initialize_weights(model):
     for m in model.modules():
         if isinstance(m, (nn.Conv2d, nn.BatchNorm2d)):
             nn.init.normal_(m.weight.data, 0.0, 0.02)
+
+if __name__ == "__main__":
+    # Example: converting a 128x128 image to 512x512.
+    # For a 4x upscaling (128->256->512), we need 2 progressive steps.
+    x = torch.randn(1, 3, 128, 128)  # Example input
+    generator = Generator(channels_img=3, features_g=256)
+    output = generator(x)  # alpha=1.0 means full contribution from the current stage.
+    print("Output shape:", output.shape)  # Expected output shape: (1, 3, 512, 512)
+    print(summary(generator,input_size=(1, 3, 128, 128),verbose=2))

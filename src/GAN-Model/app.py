@@ -8,7 +8,8 @@ import streamlit as st
 import torchvision.transforms as T
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
-from wgan_gp import Generator
+
+from wgan_gp import Generator  # Your generator definition
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -58,7 +59,7 @@ def upscale_with_center_crop(
     stride = LR_PATCH_SIZE - lr_overlap
 
     hr_overlap = lr_overlap * UPSCALE_FACTOR
-    half_ov = hr_overlap // 2  # skip around edges in the center region
+    half_ov = hr_overlap // 2
 
     def multiple_of_stride(x):
         remainder = (x - LR_PATCH_SIZE) % stride
@@ -92,16 +93,12 @@ def upscale_with_center_crop(
             left = half_ov
             right = HR_PATCH_SIZE - half_ov
 
-            # If it's the top row => keep the top edge
             if i == 0:
                 top = 0
-            # If it's the left column => keep the left edge
             if j == 0:
                 left = 0
-            # If it's the bottom row => keep the bottom edge
             if i + LR_PATCH_SIZE >= H_pad:
                 bottom = HR_PATCH_SIZE
-            # If it's the right column => keep the right edge
             if j + LR_PATCH_SIZE >= W_pad:
                 right = HR_PATCH_SIZE
 
@@ -113,7 +110,6 @@ def upscale_with_center_crop(
                       sr_ii : sr_ii + (bottom - top),
                       sr_jj : sr_jj + (right - left)] = sr_cropped
 
-    # unpad
     final_h = H * UPSCALE_FACTOR
     final_w = W * UPSCALE_FACTOR
     sr_canvas = sr_canvas[:, :, :final_h, :final_w]
@@ -161,11 +157,25 @@ def apply_sharpen_and_color(sr_pil, sharpen=False, color_boost=False):
 
     return sr_pil
 
+def apply_contrast_brightness(sr_pil, contrast_factor, brightness_factor):
+    """
+    Adjust contrast and brightness dynamically.
+    """
+    # Contrast
+    contrast_enhancer = ImageEnhance.Contrast(sr_pil)
+    sr_pil = contrast_enhancer.enhance(contrast_factor)
+
+    # Brightness
+    brightness_enhancer = ImageEnhance.Brightness(sr_pil)
+    sr_pil = brightness_enhancer.enhance(brightness_factor)
+
+    return sr_pil
+
 def main():
     st.title("GAN-CNN Upscaling")
     st.write(
         "Upload a low-res image. We'll do patch-based SR with center-crop overlap, "
-        "then optionally remove artifacts, sharpen, and boost color."
+        "then optionally remove artifacts, sharpen, boost color, and adjust brightness/contrast."
     )
 
     with st.spinner("Loading generator..."):
@@ -188,6 +198,9 @@ def main():
         sharpen = st.checkbox("Sharpen Image", value=False)
         color_boost = st.checkbox("Color Saturation Boost", value=False)
 
+        contrast_factor = st.slider("Contrast", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+        brightness_factor = st.slider("Brightness", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+
         if st.button("Upscale & Post-Process"):
             with st.spinner("Upscaling..."):
                 sr_pil = upscale_with_center_crop(
@@ -195,11 +208,14 @@ def main():
                     lr_overlap=user_overlap
                 )
 
-            with st.spinner("Artifact removal..."):
+            with st.spinner("Removing artifacts..."):
                 sr_pil = remove_artifacts(sr_pil, artifact_method=artifact_method)
 
             with st.spinner("Sharpen & color enhancement..."):
                 sr_pil = apply_sharpen_and_color(sr_pil, sharpen=sharpen, color_boost=color_boost)
+
+            with st.spinner("Adjusting contrast & brightness..."):
+                sr_pil = apply_contrast_brightness(sr_pil, contrast_factor, brightness_factor)
 
             st.image(sr_pil, caption="Final SR Result", use_container_width=True)
 
