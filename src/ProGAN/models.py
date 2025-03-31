@@ -62,20 +62,76 @@ class Generator(nn.Module):
 
         final_upscaled = self.rgb_layers[steps - 1](upscaled)
         final_out = self.rgb_layers[steps](out)
-        print("Previous: ", upscaled.shape, final_upscaled.shape)
-        print("Current: ", out.shape, final_out.shape)
         return self.fade_in(alpha, final_upscaled, final_out)
 
-if __name__ == "__main__":
-    x = torch.randn(1, 3, 128, 128)
-    generator = Generator(in_channels=3, img_channels=3)
-    output = generator(x, alpha=1.0, steps=2)
-    print("Output shape:", output.shape)
-    print(summary(
-        generator,
-        input_size=(1, 3, 128, 128),
-        verbose=2,
-        alpha=1.0,
-        steps=2
+class Discriminator(nn.Module):
+    def __init__(self, in_channels, img_channels=3):
+        super(Discriminator, self).__init__()
+        
+        self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.prog_blocks = nn.ModuleList([])
+        self.rgb_layers = nn.ModuleList([])
+        self.leaky = nn.LeakyReLU(0.2)
+
+        for i in range(len(factors) - 1, 0, -1):
+            conv_in = int(factors[i])
+            conv_out = int(factors[i - 1])
+            self.prog_blocks.append(UpBlock(conv_in, conv_out))
+            self.rgb_layers.append(WSConv2d(img_channels, conv_in, kernel_size=1, stride=1, padding=0))
+
+        self.initial_rgb = WSConv2d(img_channels, factors[0], kernel_size=1, stride=1, padding=0)
+        self.rgb_layers.append(self.initial_rgb)
+
+        self.final_block = nn.Sequential(
+            WSConv2d(factors[0] + 1, in_channels, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            WSConv2d(in_channels, in_channels, kernel_size=4, stride=1, padding=0),
+            nn.LeakyReLU(0.2),
+            WSConv2d(in_channels, 1, kernel_size=1, stride=1, padding=0),
+            nn.AdaptiveAvgPool2d(1)
         )
-    )
+
+
+    def fade_in(self, alpha, downscaled, out):
+        # print(out.shape, downscaled.shape)
+        return alpha * out + (1 - alpha) * downscaled
+
+    def minibatch_std(self, x):
+        batch_statistics = torch.std(x, dim=0).mean().repeat(x.shape[0], 1, x.shape[2], x.shape[3])
+        return torch.cat([x, batch_statistics], dim=1)
+
+    def forward(self, x, alpha, steps):
+        cur_step = len(self.prog_blocks) - steps
+        out = self.leaky(self.rgb_layers[cur_step](x))
+
+        if steps == 0:
+            out = self.minibatch_std(out)
+            return self.final_block(out).view(out.shape[0], -1)
+
+        downscaled = self.leaky(self.rgb_layers[cur_step + 1](self.avg_pool(x)))
+        out = self.avg_pool(self.prog_blocks[cur_step](out))
+        out = self.fade_in(alpha, downscaled, out)
+
+        for step in range(cur_step + 1, len(self.prog_blocks)):
+            out = self.prog_blocks[step](out)
+            out = self.avg_pool(out)
+
+        out = self.minibatch_std(out)
+        # print("Output shape after mini batch before final: ", out.shape)
+        return self.final_block(out).view(out.shape[0], -1)
+
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Example: converting a 128x128 image to 512x512
+    x = torch.randn(5, 3, 128, 128).to(device)
+    generator = Generator(in_channels=3, img_channels=3).to(device)
+    
+    # Use autocast to run in FP16 precision for inference
+    with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
+        output = generator(x, alpha=1.0, steps=2)  # 2 steps: 128->256->512
+    print("Generator Output shape:", output.shape)
+    
+    discriminator = Discriminator(in_channels=3, img_channels=3).to(device)
+    with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
+        disc_out = discriminator(output, alpha=1.0, steps=2)
+    print("Discriminator Output shape:", disc_out.shape)
