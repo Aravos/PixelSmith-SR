@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchinfo import summary
 from math import log2
 
-factors = [64, 128, 256]
+factors = [32, 64, 128]
 
 class WSConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, gain=2):

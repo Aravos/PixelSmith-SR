@@ -13,8 +13,8 @@ def plot_to_tensorboard(writer, loss_critic, loss_gen, real, fake, tensorboard_s
     writer.add_scalar("Loss Generator", loss_gen, global_step=tensorboard_step)
 
     with torch.no_grad():
-        img_grid_real = torchvision.utils.make_grid(real, normalize=True)
-        img_grid_fake = torchvision.utils.make_grid(fake, normalize=True)
+        img_grid_real = torchvision.utils.make_grid(real[:4], normalize=True)
+        img_grid_fake = torchvision.utils.make_grid(fake[:4], normalize=True)
         writer.add_image("Real", img_grid_real, global_step=tensorboard_step)
         writer.add_image("Fake", img_grid_fake, global_step=tensorboard_step)
 
@@ -42,21 +42,33 @@ def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
     return gradient_penalty
 
 
-def save_checkpoint(model, optimizer, filename):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    print("=> Saving checkpoint")
-    checkpoint = {
-        "state_dict": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+def save_training_state(epoch, step, alpha, tensorboard_step, generator, critic, opt_gen, opt_critic):
+    state = {
+        "epoch": epoch,
+        "step": step,
+        "alpha": alpha,
+        "tensorboard_step": tensorboard_step,
+        "gen_state": generator.state_dict(),
+        "critic_state": critic.state_dict(),
+        "opt_gen_state": opt_gen.state_dict(),
+        "opt_critic_state": opt_critic.state_dict()
     }
-    torch.save(checkpoint, filename)
+    os.makedirs(os.path.dirname(config.CHECKPOINT_STATE), exist_ok=True)
+    torch.save(state, config.CHECKPOINT_STATE)
+    print("=> Saved training state at epoch", epoch+1)
 
-
-def load_checkpoint(checkpoint_file, model, optimizer, lr):
-    print("=> Loading checkpoint")
-    checkpoint = torch.load(checkpoint_file, map_location="cuda")
-    model.load_state_dict(checkpoint["state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
+def load_training_state(generator, critic, opt_gen, opt_critic):
+    if os.path.exists(config.CHECKPOINT_STATE):
+        state = torch.load(config.CHECKPOINT_STATE, map_location=config.DEVICE)
+        generator.load_state_dict(state["gen_state"])
+        critic.load_state_dict(state["critic_state"])
+        opt_gen.load_state_dict(state["opt_gen_state"])
+        opt_critic.load_state_dict(state["opt_critic_state"])
+        print("=> Resuming training from epoch", state["epoch"], "step", state["step"])
+        return state["epoch"], state["step"], state["alpha"], state["tensorboard_step"]
+    # If no checkpoint exists, start with default values.
+    default_epoch = 0
+    default_step = int(log2(config.START_IMG_SIZE / 128))
+    default_alpha = 1e-5
+    default_tb_step = 0
+    return default_epoch, default_step, default_alpha, default_tb_step
