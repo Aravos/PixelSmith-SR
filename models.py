@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchinfo import summary
 from math import log2
 
 factors = [32, 64, 128]

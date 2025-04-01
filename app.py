@@ -16,7 +16,7 @@ STEP = 1
 LR_PATCH_SIZE = 128
 HR_PATCH_SIZE = LR_PATCH_SIZE * UPSCALE_FACTOR
 
-DEFAULT_CHECKPOINT_PATH = "./Image-Upscaler/training_state.pth"
+DEFAULT_CHECKPOINT_PATH = "./training_state.pth"
 
 mean = (0.5, 0.5, 0.5)
 std  = (0.5, 0.5, 0.5)
