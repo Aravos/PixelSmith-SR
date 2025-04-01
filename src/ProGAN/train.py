@@ -84,7 +84,9 @@ def main():
     # Resume training state if available and LOAD_MODEL is True
     if config.LOAD_MODEL:
         epoch, step, alpha, tensorboard_step = load_training_state(generator, critic, opt_gen, opt_critic)
-        epoch += 1
+        # Manually change
+        epoch = 0
+        step = 2
     else:
         epoch, step, alpha, tensorboard_step = 0, int(log2(config.START_IMG_SIZE / 128)), 1e-5, 0
 
