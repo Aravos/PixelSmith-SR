@@ -9,9 +9,14 @@ __pycache__/
 # Ignore logs
 logs/
 logs-WGAN/
+old-logs/
 
 # Ignore model checkpoints (if large)
 checkpoints/
+src/ProGAN/checkpoints
 
 # Ignore dataset (if too large or available elsewhere)
 dataset/
+
+#misc
+leftover/
