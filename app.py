@@ -6,14 +6,9 @@ import torch
 import torch.nn.functional as F
 import streamlit as st
 import torchvision.transforms as T
-from PIL import Image, ImageFilter, ImageEnhance # Import ImageEnhance
-from skimage import exposure
-from skimage.color import rgb2lab, lab2rgb
-from skimage import img_as_float
-import sys
-from pathlib import Path
+from PIL import Image, ImageFilter, ImageEnhance
 
-from src.models import Generator
+from models import Generator
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 UPSCALE_FACTOR = 2
@@ -21,7 +16,7 @@ STEP = 1
 LR_PATCH_SIZE = 128
 HR_PATCH_SIZE = LR_PATCH_SIZE * UPSCALE_FACTOR
 
-DEFAULT_CHECKPOINT_PATH = "./02-Upscale-Project/Image-Upscaler/src/ProGAN/Prod-model/training_state.pth"
+DEFAULT_CHECKPOINT_PATH = "./Image-Upscaler/training_state.pth"
 
 mean = (0.5, 0.5, 0.5)
 std  = (0.5, 0.5, 0.5)

@@ -29,10 +29,9 @@ except ImportError as e:
 dataset_base = os.path.join(project_root, "dataset", "Processed")
 
 HR_DIR = os.path.join(dataset_base, "HR_Chunks")
-LR_128_DIR = os.path.join(dataset_base, "LR_128")
-LR_256_DIR = os.path.join(dataset_base, "LR_256")
+LR_128_DIR = os.path.join(dataset_base, "LR_256")
 
-for dir_path in [HR_DIR, LR_128_DIR, LR_256_DIR]:
+for dir_path in [HR_DIR, LR_128_DIR]:
     if not os.path.isdir(dir_path):
         print(f"Warning: Dataset directory not found: {dir_path}")
     else:
@@ -47,19 +46,18 @@ print(f"Absolute Log Path:        {LOG_PATH}")
 START_IMG_SIZE = 128
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_MODEL = True
-LOAD_MODEL = True
+LOAD_MODEL = False
 LEARNING_RATE = 1e-3
-BATCH_SIZES = [64, 32, 4]
+BATCH_SIZES = [256, 32]
 CHANNELS_IMG = 3
 CRITIC_ITERATIONS = 3
 LAMBDA_GP = 10
-PROGRESSIVE_EPOCHS = [40, 25, 20]
+PROGRESSIVE_EPOCHS = [30, 30]
 NUM_WORKERS = 4
 
 try:
     DATASET = [
         ChunkDataset(hr_dir=LR_128_DIR, lr_dir=LR_128_DIR),
-        ChunkDataset(hr_dir=LR_256_DIR, lr_dir=LR_128_DIR),
         ChunkDataset(hr_dir=HR_DIR, lr_dir=LR_128_DIR)
     ]
     print("\nSuccessfully initialized DATASET list.")

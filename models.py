@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchinfo import summary
 from math import log2
 
-factors = [32, 64]
+factors = [32, 64, 128]
 
 class WSConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, gain=2):
@@ -94,6 +94,7 @@ class Critic(nn.Module):
 
 
     def fade_in(self, alpha, downscaled, out):
+        # print(out.shape, downscaled.shape)
         return alpha * out + (1 - alpha) * downscaled
 
     def minibatch_std(self, x):
@@ -122,7 +123,7 @@ class Critic(nn.Module):
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    for img_size in [128, 256]:
+    for img_size in [128, 256, 512]:
 
         num_steps = int(log2(img_size / 128))
 
@@ -138,7 +139,7 @@ if __name__ == "__main__":
         
         critic = Critic(in_channels=3, img_channels=3).to(device)
         with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
-            disc_out = critic(output, alpha=1.0, steps=num_steps)
+            disc_out = critic(output, alpha=1.0, steps=2)
         
         assert disc_out.shape == (1, 1), f"Expected critic output shape (1,1), got {disc_out.shape}"
         

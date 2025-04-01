@@ -1,5 +1,6 @@
 import os
 import torch
+import sys
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -26,7 +27,7 @@ def train_fn(
 ):
     dataloader = DataLoader(dataset_list[step],batch_size=config.BATCH_SIZES[step],shuffle=True,num_workers=config.NUM_WORKERS)
     num_batches = len(dataloader)
-    mid_batch = num_batches // 2
+    quater_batch = num_batches // 4
 
     loop = tqdm(dataloader, desc=f"Training step {step}", leave=True)
     for batch_idx, (lr_img, hr_img) in enumerate(loop):
@@ -62,7 +63,7 @@ def train_fn(
         alpha += config.BATCH_SIZES[step] / ((config.PROGRESSIVE_EPOCHS[step] * 0.5) * len(dataset_list[step]))
         alpha = min(alpha, 1)
 
-        if batch_idx == mid_batch or batch_idx == (num_batches - 1):
+        if batch_idx % quater_batch == 0:
             plot_to_tensorboard(writer,loss_critic.item(),loss_gen.item(),hr_img.detach(),fake_hr.detach(),tensorboard_step)
             tensorboard_step += 1
 
@@ -84,6 +85,7 @@ def main():
     # Resume training state if available and LOAD_MODEL is True
     if config.LOAD_MODEL:
         epoch, step, alpha, tensorboard_step = load_training_state(generator, critic, opt_gen, opt_critic)
+        sys.exit()
         # Manually change
         epoch = 0
         step = 2
