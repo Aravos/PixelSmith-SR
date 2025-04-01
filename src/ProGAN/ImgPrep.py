@@ -1,95 +1,108 @@
 import os
 import glob
-import random
 import cv2
 import numpy as np
 
-# Paths (update if needed)
+# Paths
 HR_DIR = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/DIV2K/DIV2K_train_HR"
-LR_DIR = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/DIV2K/DIV2K_train_LR_blurred"
+LR_128_DIR = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/DIV2K/DIV2K_train_LR_blurred"
+LR_256_DIR = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/DIV2K/DIV2K_train_LR_blurred_2"
 
-# Output directories for chunks
+# Output directories
 HR_OUT = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/Processed/HR_Chunks"
-LR_OUT = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/Processed/\LR_Chunks"
+LR_128_OUT = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/Processed/LR_128"
+LR_256_OUT = "/home/aravos/Code/02-Upscale-Project/Image-Upscaler/dataset/Processed/LR_256"
 
-os.makedirs(HR_OUT)
-os.makedirs(LR_OUT)
+os.makedirs(HR_OUT, exist_ok=True)
+os.makedirs(LR_128_OUT, exist_ok=True)
+os.makedirs(LR_256_OUT, exist_ok=True)
 
 # Desired chunk sizes
 HR_CHUNK_SIZE = 512
-LR_CHUNK_SIZE = 128
+LR_128_CHUNK_SIZE = 128
+LR_256_CHUNK_SIZE = 256
 
 def reflect_pad(image, patch_size):
-    """Apply reflect padding so that the image dimensions become multiples of patch_size."""
+    """Apply reflect padding to ensure the image dimensions are multiples of patch_size."""
     h, w, _ = image.shape
     pad_h = (patch_size - (h % patch_size)) % patch_size
     pad_w = (patch_size - (w % patch_size)) % patch_size
     padded = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT)
     return padded
 
-# Get sorted list of PNG files for HR and LR images
+# Get sorted list of PNG files from HR directory
 hr_images = sorted(glob.glob(os.path.join(HR_DIR, "*.png")))
-lr_images = sorted(glob.glob(os.path.join(LR_DIR, "*.png")))
+lr128_images = sorted(glob.glob(os.path.join(LR_128_DIR, "*.png")))
+lr256_images = sorted(glob.glob(os.path.join(LR_256_DIR, "*.png")))
 
-print(f"Found {len(hr_images)} HR images and {len(lr_images)} LR images.")
+print(f"Found {len(hr_images)} HR images, {len(lr128_images)} LR_128 images, and {len(lr256_images)} LR_256 images.")
 
-assert len(hr_images) == len(lr_images), "Mismatch between HR and LR file counts!"
+assert len(hr_images) == len(lr128_images) == len(lr256_images), "Mismatch in file counts!"
 
-# Process each image pair
 total_chunks = 0
-for hr_path, lr_path in zip(hr_images, lr_images):
-    print(f"\nProcessing {os.path.basename(hr_path)} ...")
+
+for hr_path, lr128_path, lr256_path in zip(hr_images, lr128_images, lr256_images):
+    base_name = os.path.splitext(os.path.basename(hr_path))[0]
+    print(f"\nProcessing {base_name} ...")
+    
     # Read images
     hr_img = cv2.imread(hr_path, cv2.IMREAD_COLOR)
-    lr_img = cv2.imread(lr_path, cv2.IMREAD_COLOR)
+    lr128_img = cv2.imread(lr128_path, cv2.IMREAD_COLOR)
+    lr256_img = cv2.imread(lr256_path, cv2.IMREAD_COLOR)
 
-    if hr_img is None or lr_img is None:
-        print(f"Warning: Could not load one of the images: {hr_path}, {lr_path}. Skipping.")
+    if hr_img is None or lr128_img is None or lr256_img is None:
+        print(f"Warning: Could not load one of the images for {base_name}. Skipping.")
         continue
 
-    # Ensure corresponding file names match
-    if os.path.basename(hr_path) != os.path.basename(lr_path):
-        print(f"Error: Filename mismatch between {hr_path} and {lr_path}")
+    # Ensure filenames match (optional check)
+    if not (os.path.basename(hr_path) == os.path.basename(lr128_path) == os.path.basename(lr256_path)):
+        print(f"Error: Filename mismatch for {base_name}. Skipping.")
         continue
 
     # Apply reflect padding
     hr_img = reflect_pad(hr_img, HR_CHUNK_SIZE)
-    lr_img = reflect_pad(lr_img, LR_CHUNK_SIZE)
+    lr128_img = reflect_pad(lr128_img, LR_128_CHUNK_SIZE)
+    lr256_img = reflect_pad(lr256_img, LR_256_CHUNK_SIZE)
 
     # Get padded sizes
     h_hr, w_hr, _ = hr_img.shape
-    h_lr, w_lr, _ = lr_img.shape
+    h_lr128, w_lr128, _ = lr128_img.shape
+    h_lr256, w_lr256, _ = lr256_img.shape
 
-    chunk_map = []  # List to store (HR_chunk, LR_chunk, random_name)
-
-    # Extract patches from HR image and matching LR image
+    hr_chunks = []
+    lr128_chunks = []
+    lr256_chunks = []
+    
+    # Extract patches from HR image
+    chunk_index = 0
     for y in range(0, h_hr, HR_CHUNK_SIZE):
         for x in range(0, w_hr, HR_CHUNK_SIZE):
             hr_chunk = hr_img[y:y+HR_CHUNK_SIZE, x:x+HR_CHUNK_SIZE]
-            # LR image is 4x smaller, so scale coordinates
-            lr_y = y // 4
-            lr_x = x // 4
-            lr_chunk = lr_img[lr_y:lr_y+LR_CHUNK_SIZE, lr_x:lr_x+LR_CHUNK_SIZE]
+            # For LR_128: assuming HR is 4x LR, scale coordinates by 1/4
+            lr128_y = y // 4
+            lr128_x = x // 4
+            lr128_chunk = lr128_img[lr128_y:lr128_y+LR_128_CHUNK_SIZE, lr128_x:lr128_x+LR_128_CHUNK_SIZE]
+            # For LR_256: assuming HR is 2x LR, scale coordinates by 1/2
+            lr256_y = y // 2
+            lr256_x = x // 2
+            lr256_chunk = lr256_img[lr256_y:lr256_y+LR_256_CHUNK_SIZE, lr256_x:lr256_x+LR_256_CHUNK_SIZE]
+            
+            hr_chunks.append(hr_chunk)
+            lr128_chunks.append(lr128_chunk)
+            lr256_chunks.append(lr256_chunk)
+            chunk_index += 1
 
-            random_name = f"{random.randint(100000, 999999)}.png"
-            chunk_map.append((hr_chunk, lr_chunk, random_name))
-    
-    print(f"Extracted {len(chunk_map)} chunks from {os.path.basename(hr_path)}")
-    total_chunks += len(chunk_map)
+    print(f"Extracted {len(hr_chunks)} chunks from {base_name}")
+    total_chunks += len(hr_chunks)
 
-    # Shuffle chunk_map to randomize filenames
-    random.shuffle(chunk_map)
-
-    # Save each chunk pair
-    for hr_chunk, lr_chunk, random_name in chunk_map:
-        hr_save_path = os.path.join(HR_OUT, random_name)
-        lr_save_path = os.path.join(LR_OUT, random_name)
-        success_hr = cv2.imwrite(hr_save_path, hr_chunk)
-        success_lr = cv2.imwrite(lr_save_path, lr_chunk)
-        if not (success_hr and success_lr):
-            print(f"Error saving chunk {random_name}")
-        else:
-            print(f"Saved chunk: {random_name}")
+    # Save each chunk with a filename: originalname_chunk{index}.png
+    for idx, (hr_chunk, lr128_chunk, lr256_chunk) in enumerate(zip(hr_chunks, lr128_chunks, lr256_chunks)):
+        hr_save_path = os.path.join(HR_OUT, f"{base_name}_chunk{idx}.png")
+        lr128_save_path = os.path.join(LR_128_OUT, f"{base_name}_chunk{idx}.png")
+        lr256_save_path = os.path.join(LR_256_OUT, f"{base_name}_chunk{idx}.png")
+        cv2.imwrite(hr_save_path, hr_chunk)
+        cv2.imwrite(lr128_save_path, lr128_chunk)
+        cv2.imwrite(lr256_save_path, lr256_chunk)
+        print(f"Saved chunk: {base_name}_chunk{idx}.png")
 
 print(f"\nProcessing complete. Total chunks extracted: {total_chunks}")
-print("Chunks saved successfully!")

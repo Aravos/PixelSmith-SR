@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
+from math import log2
 
 factors = [64, 128, 256]
 
@@ -64,9 +65,9 @@ class Generator(nn.Module):
         final_out = self.rgb_layers[steps](out)
         return self.fade_in(alpha, final_upscaled, final_out)
 
-class Discriminator(nn.Module):
+class Critic(nn.Module):
     def __init__(self, in_channels, img_channels=3):
-        super(Discriminator, self).__init__()
+        super(Critic, self).__init__()
         
         self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
         self.prog_blocks = nn.ModuleList([])
@@ -83,11 +84,11 @@ class Discriminator(nn.Module):
         self.rgb_layers.append(self.initial_rgb)
 
         self.final_block = nn.Sequential(
-            WSConv2d(factors[0] + 1, in_channels, kernel_size=3, padding=1),
+            WSConv2d(factors[0] + 1, factors[0] // 2, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            WSConv2d(in_channels, in_channels, kernel_size=4, stride=1, padding=0),
+            WSConv2d(factors[0] // 2, factors[0] // 4, kernel_size=4, stride=1, padding=0),
             nn.LeakyReLU(0.2),
-            WSConv2d(in_channels, 1, kernel_size=1, stride=1, padding=0),
+            WSConv2d(factors[0] // 4, 1, kernel_size=1, stride=1, padding=0),
             nn.AdaptiveAvgPool2d(1)
         )
 
@@ -122,16 +123,24 @@ class Discriminator(nn.Module):
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Example: converting a 128x128 image to 512x512
-    x = torch.randn(5, 3, 128, 128).to(device)
-    generator = Generator(in_channels=3, img_channels=3).to(device)
-    
-    # Use autocast to run in FP16 precision for inference
-    with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
-        output = generator(x, alpha=1.0, steps=2)  # 2 steps: 128->256->512
-    print("Generator Output shape:", output.shape)
-    
-    discriminator = Discriminator(in_channels=3, img_channels=3).to(device)
-    with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
-        disc_out = discriminator(output, alpha=1.0, steps=2)
-    print("Discriminator Output shape:", disc_out.shape)
+    for img_size in [128, 256, 512]:
+
+        num_steps = int(log2(img_size / 128))
+
+        x = torch.randn(1, 3, 128, 128).to(device)
+        generator = Generator(in_channels=3, img_channels=3).to(device)
+        
+        # autocast to run in FP16 precision 
+        with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
+            output = generator(x, alpha=1.0, steps=num_steps)
+        
+        expected_shape = (1, 3, img_size, img_size)
+        assert output.shape == expected_shape, f"Expected {expected_shape}, got {output.shape}"
+        
+        critic = Critic(in_channels=3, img_channels=3).to(device)
+        with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type=device):
+            disc_out = critic(output, alpha=1.0, steps=2)
+        
+        assert disc_out.shape == (1, 1), f"Expected critic output shape (1,1), got {disc_out.shape}"
+        
+        print(f"Success for {img_size}")
