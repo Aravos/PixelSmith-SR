@@ -8,10 +8,8 @@ import torch.nn.functional as F
 import streamlit as st
 import torchvision.transforms as T
 from PIL import Image, ImageFilter, ImageEnhance
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 try:
-    from src.ProGAN.models import Generator
+    from .models import Generator
 except ImportError:
     st.error("Could not import the Generator model. Make sure 'models.py' is in the correct path or added to PYTHONPATH.")
     st.info("Common Fixes:\n1. Place `models.py` in the same directory as this Streamlit script.\n2. Ensure the directory containing `models.py` is in your system's PYTHONPATH environment variable.")
