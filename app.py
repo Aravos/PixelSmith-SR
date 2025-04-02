@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import io
 import cv2
@@ -7,468 +8,471 @@ import torch.nn.functional as F
 import streamlit as st
 import torchvision.transforms as T
 from PIL import Image, ImageFilter, ImageEnhance
+import hashlib
 
-from models import Generator
+# --- Page Config ---
+st.set_page_config(layout="wide", page_title="PixelSmith-SR")
 
+# --- Model Imports ---
+_old_model_import_error = None
+_new_model_import_error = None
+try:
+    from Prod.newmodels import Generator as NewGenerator
+    NEW_MODEL_AVAILABLE = True
+except ImportError as e:
+    _new_model_import_error = f"Could not import 'Generator' from 'Prod/newmodels.py'. Error: {e}"
+    NEW_MODEL_AVAILABLE = False
+    NewGenerator = None
+try:
+    from Prod.models import Generator
+    OLD_MODEL_AVAILABLE = True
+except ImportError as e:
+    _old_model_import_error = f"Could not import 'Generator' from 'Prod/models.py'. Error: {e}"
+    OLD_MODEL_AVAILABLE = False
+    if 'Generator' not in locals() or Generator is None:
+        Generator = None
+
+# --- Constants ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 UPSCALE_FACTOR = 2
-STEP = 1
 LR_PATCH_SIZE = 128
 HR_PATCH_SIZE = LR_PATCH_SIZE * UPSCALE_FACTOR
+DEFAULT_CHECKPOINT_PATH = "./Prod/training_state.pth"
+NEW_CHECKPOINT_PATH = "./Prod/new_training_state.pth"
 
-DEFAULT_CHECKPOINT_PATH = "./training_state.pth"
+# --- Model Config ---
+MODEL_OPTIONS = {}
+if NEW_MODEL_AVAILABLE:
+    MODEL_OPTIONS["New Model"] = {
+        "class": NewGenerator,
+        "path": NEW_CHECKPOINT_PATH,
+        "params": {"in_channels": 3, "img_channels": 3}
+    }
+if OLD_MODEL_AVAILABLE:
+    MODEL_OPTIONS["Old Model"] = {
+        "class": Generator,
+        "path": DEFAULT_CHECKPOINT_PATH,
+        "params": {"in_channels": 3, "img_channels": 3}
+    }
 
+# --- Initial Checks ---
+if _old_model_import_error:
+    st.error(_old_model_import_error)
+if _new_model_import_error:
+    st.error(_new_model_import_error)
+if not MODEL_OPTIONS:
+    st.error("No generator models configured. Cannot proceed.")
+    st.stop()
+
+# --- Transforms ---
 mean = (0.5, 0.5, 0.5)
-std  = (0.5, 0.5, 0.5)
+std = (0.5, 0.5, 0.5)
 normalize = T.Normalize(mean, std)
 to_tensor = T.ToTensor()
 to_pil = T.ToPILImage()
 
+# --- Session State ---
+default_session_state = {
+    'sharpen': False,
+    'sharpen_radius': 1.5,
+    'sharpen_percent': 150,
+    'sharpen_threshold': 3,
+    'smooth': False,
+    'smooth_radius': 0.5,
+    'lr_overlap': 4,
+    'apply_brightness_contrast': False,
+    'brightness_factor': 1.0,
+    'contrast_factor': 1.0,
+    'model_loaded_message_shown': ''
+}
+for key, value in default_session_state.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
-# --- Initialize Session State ---
-if 'sharpen' not in st.session_state:
-    st.session_state.sharpen = False
-if 'sharpen_radius' not in st.session_state:
-    st.session_state.sharpen_radius = 1.5
-if 'sharpen_percent' not in st.session_state:
-    st.session_state.sharpen_percent = 150
-if 'sharpen_threshold' not in st.session_state:
-    st.session_state.sharpen_threshold = 3
-if 'smooth' not in st.session_state:
-    st.session_state.smooth = False
-if 'smooth_radius' not in st.session_state:
-    st.session_state.smooth_radius = 0.5
-if 'lr_overlap' not in st.session_state:
-    st.session_state.lr_overlap = 16
-# New state for brightness/contrast
-if 'apply_brightness_contrast' not in st.session_state:
-    st.session_state.apply_brightness_contrast = False
-if 'brightness_factor' not in st.session_state:
-    st.session_state.brightness_factor = 1.0 # 1.0 means no change
-if 'contrast_factor' not in st.session_state:
-    st.session_state.contrast_factor = 1.0 # 1.0 means no change
-
-
+# --- Model Loading Cache ---
 @st.cache_resource
-def load_generator_model(ckpt_path):
-    """Loads the generator model from the specified checkpoint."""
-    if not os.path.exists(ckpt_path):
-        st.error(f"Checkpoint file not found at: {ckpt_path}")
+def load_selected_generator_model(model_name: str, model_class: type, ckpt_path: str, model_params: dict):
+    if not model_class:
+        st.error(f"Model class for '{model_name}' not available.")
         st.stop()
-
-    st.write(f"⏳ Loading generator checkpoint: `{os.path.basename(ckpt_path)}`")
+    if not os.path.exists(ckpt_path):
+        st.error(f"Checkpoint for '{model_name}' not found: `{ckpt_path}`")
+        st.stop()
+    loading_placeholder = st.sidebar.empty()
+    loading_placeholder.info(f"⏳ Loading: **{model_name}** (`{os.path.basename(ckpt_path)}`)")
     try:
+        gen = model_class(**model_params).to(DEVICE)
         checkpoint = torch.load(ckpt_path, map_location=DEVICE)
-        gen = Generator(in_channels=3, img_channels=3).to(DEVICE)
-
         state_dict = None
-        if "gen_state" in checkpoint:
-            state_dict = checkpoint["gen_state"]
-        else:
-             st.error("Could not find a valid generator state_dict in the checkpoint file.")
-             st.stop()
-
+        potential_keys = ["gen_state", "state_dict", "generator", "g_state", "model"]
+        if isinstance(checkpoint, dict):
+            for key in potential_keys:
+                if key in checkpoint:
+                    state_dict = checkpoint[key]
+                    break
+            if state_dict is None and all(isinstance(k, str) for k in checkpoint.keys()):
+                state_dict = checkpoint
+        elif hasattr(checkpoint, 'state_dict') and callable(checkpoint.state_dict):
+            state_dict = checkpoint.state_dict()
+        elif isinstance(checkpoint, (dict, torch.Tensor)):
+            state_dict = checkpoint
+        if state_dict is None:
+            loading_placeholder.error(f"Cannot find valid state_dict in checkpoint for {model_name}.")
+            st.stop()
         if all(key.startswith('module.') for key in state_dict.keys()):
-             state_dict = {k[len('module.'):]: v for k, v in state_dict.items()}
-
+            state_dict = {k[len('module.'):]: v for k, v in state_dict.items()}
         gen.load_state_dict(state_dict)
         gen.eval()
-        st.success(f"✅ Generator loaded successfully!")
+        loading_placeholder.empty()
         return gen
     except Exception as e:
-        st.error(f"❌ Error loading checkpoint: {e}")
-        st.error("Ensure the checkpoint file is valid, matches the Generator architecture, and the correct state_dict key is present.")
+        loading_placeholder.empty()
+        st.error(f"❌ Error loading {model_name}:")
         st.exception(e)
         st.stop()
 
-
-def upscale_with_center_crop(pil_img, generator, lr_overlap=16):
-    """
-    Upscales a PIL image by 2x using the generator with chunking and center cropping.
-    """
-    step = STEP
-    upscale_factor = UPSCALE_FACTOR
-
+# --- Upscaling Internals ---
+def _internal_upscale(pil_img, generator, lr_overlap, us=UPSCALE_FACTOR):
     lr_tensor = to_tensor(pil_img).unsqueeze(0).to(DEVICE)
     lr_tensor = normalize(lr_tensor.squeeze(0)).unsqueeze(0)
-
-
     _, _, H, W = lr_tensor.shape
     stride = LR_PATCH_SIZE - lr_overlap
-    hr_overlap = lr_overlap * upscale_factor
+    hr_overlap = lr_overlap * us
     half_ov = hr_overlap // 2
-
     if stride <= 0:
-        st.warning(f"Overlap ({lr_overlap}px) is too large for the patch size ({LR_PATCH_SIZE}px). Reducing overlap.")
         lr_overlap = LR_PATCH_SIZE - 8
         stride = LR_PATCH_SIZE - lr_overlap
-        hr_overlap = lr_overlap * upscale_factor
+        hr_overlap = lr_overlap * us
         half_ov = hr_overlap // 2
-
-    def get_pad(dim_size, patch_size, stride_size):
-        """Calculate padding needed for a dimension."""
-        if dim_size <= patch_size:
-            return max(0, patch_size - dim_size)
-        remainder = (dim_size - patch_size) % stride_size
-        if remainder == 0:
-            return 0
-        else:
-            return stride_size - remainder
-
+    def get_pad(ds, ps, ss):
+        return max(0, ps - ds) if ds <= ps else (0 if (ds - ps) % ss == 0 else ss - (ds - ps) % ss)
     pad_h = get_pad(H, LR_PATCH_SIZE, stride)
     pad_w = get_pad(W, LR_PATCH_SIZE, stride)
-
     lr_tensor_padded = F.pad(lr_tensor, (0, pad_w, 0, pad_h), mode="reflect")
     _, _, H_pad, W_pad = lr_tensor_padded.shape
-
-    out_h = H_pad * upscale_factor
-    out_w = W_pad * upscale_factor
+    out_h = H_pad * us
+    out_w = W_pad * us
     sr_canvas = torch.zeros((1, 3, out_h, out_w), device=DEVICE)
-
-    total_patches = len(range(0, H_pad - LR_PATCH_SIZE + 1, stride)) * \
-                    len(range(0, W_pad - LR_PATCH_SIZE + 1, stride))
-    pbar = st.progress(0, text="Processing patches...")
+    nph = (H_pad - LR_PATCH_SIZE + stride) // stride if H_pad > LR_PATCH_SIZE else 1
+    npw = (W_pad - LR_PATCH_SIZE + stride) // stride if W_pad > LR_PATCH_SIZE else 1
+    total_patches = max(1, nph * npw)
+    pbar_placeholder = st.empty()
     patch_count = 0
-
-
     for i in range(0, H_pad - LR_PATCH_SIZE + 1, stride):
         for j in range(0, W_pad - LR_PATCH_SIZE + 1, stride):
+            if total_patches > 0 and patch_count % 5 == 0:
+                prog = min(1.0, patch_count / total_patches)
+                try:
+                    pbar_placeholder.progress(prog, text=f"Processing... ({patch_count}/{total_patches})")
+                except:
+                    pass
             lr_patch = lr_tensor_padded[:, :, i:i+LR_PATCH_SIZE, j:j+LR_PATCH_SIZE]
             with torch.no_grad():
-                sr_patch = generator(lr_patch, alpha=1.0, steps=step)
-
-            sr_i = i * upscale_factor
-            sr_j = j * upscale_factor
-
+                try:
+                    sr_patch = generator(lr_patch, alpha=1.0, steps=1)
+                except TypeError as te:
+                    st.error(f"Model ({generator.__class__.__name__}) inference TypeError patch ({i},{j}): {te}. Adapt _internal_upscale.")
+                    pbar_placeholder.empty()
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Inference error patch ({i},{j}): {e}")
+                    pbar_placeholder.empty()
+                    st.stop()
+            sr_i = i * us
+            sr_j = j * us
             top_crop = half_ov if i > 0 else 0
             left_crop = half_ov if j > 0 else 0
-            bottom_crop = HR_PATCH_SIZE - half_ov if (i + LR_PATCH_SIZE) < H_pad else HR_PATCH_SIZE
-            right_crop = HR_PATCH_SIZE - half_ov if (j + LR_PATCH_SIZE) < W_pad else HR_PATCH_SIZE
-
-
-            top_paste = sr_i + half_ov if i > 0 else 0
-            left_paste = sr_j + half_ov if j > 0 else 0
+            last_row = (i + stride) > (H_pad - LR_PATCH_SIZE)
+            last_col = (j + stride) > (W_pad - LR_PATCH_SIZE)
+            bottom_crop = HR_PATCH_SIZE - half_ov if not last_row else HR_PATCH_SIZE
+            right_crop = HR_PATCH_SIZE - half_ov if not last_col else HR_PATCH_SIZE
+            top_paste = sr_i + top_crop
+            left_paste = sr_j + left_crop
             paste_h = bottom_crop - top_crop
             paste_w = right_crop - left_crop
             bottom_paste = top_paste + paste_h
             right_paste = left_paste + paste_w
-
-            sr_cropped = sr_patch[:, :, top_crop:bottom_crop, left_crop:right_crop]
-
+            bottom_paste = min(bottom_paste, out_h)
+            right_paste = min(right_paste, out_w)
+            bottom_crop = min(bottom_crop, HR_PATCH_SIZE)
+            right_crop = min(right_crop, HR_PATCH_SIZE)
+            paste_h = bottom_paste - top_paste
+            paste_w = right_paste - left_paste
+            bottom_crop = top_crop + paste_h
+            right_crop = left_crop + paste_w
             try:
-                 sr_canvas[:, :, top_paste:bottom_paste, left_paste:right_paste] = sr_cropped
-            except RuntimeError as e:
-                 st.warning(f"Shape mismatch during patch paste (runtime error): {e}. Cropped: {sr_cropped.shape}, Canvas Slice: {sr_canvas[:, :, top_paste:bottom_paste, left_paste:right_paste].shape}. Skipping patch.")
-
+                if paste_h > 0 and paste_w > 0 and (bottom_crop - top_crop) > 0 and (right_crop - left_crop) > 0:
+                    sr_cropped = sr_patch[:, :, top_crop:bottom_crop, left_crop:right_crop]
+                    target_slice = sr_canvas[:, :, top_paste:bottom_paste, left_paste:right_paste]
+                    if sr_cropped.shape == target_slice.shape:
+                        sr_canvas[:, :, top_paste:bottom_paste, left_paste:right_paste] = sr_cropped
+            except Exception as e:
+                st.warning(f"Patch paste error ({i},{j}): {e}. Skip.")
             patch_count += 1
-            progress_percent = min(1.0, patch_count / total_patches)
-            pbar.progress(progress_percent, text=f"Processing patches... ({patch_count}/{total_patches})")
-
-
-    pbar.empty()
-
-    final_h = H * upscale_factor
-    final_w = W * upscale_factor
+    pbar_placeholder.empty()
+    final_h = H * us
+    final_w = W * us
     final_h = min(final_h, sr_canvas.shape[2])
     final_w = min(final_w, sr_canvas.shape[3])
     sr_canvas = sr_canvas[:, :, :final_h, :final_w]
-
     sr_canvas = (sr_canvas * 0.5) + 0.5
     sr_canvas = sr_canvas.clamp(0, 1)
+    return to_pil(sr_canvas.squeeze(0).cpu())
 
-    sr_pil = to_pil(sr_canvas.squeeze(0).cpu())
-    return sr_pil
+# --- Upscaling Cache ---
+@st.cache_data(show_spinner=False)
+def cached_upscale_image(lr_img_bytes, _model_name, _lr_overlap):
+    model_info = MODEL_OPTIONS[_model_name]
+    generator = load_selected_generator_model(_model_name, model_info["class"], model_info["path"], model_info["params"])
+    if generator is None:
+        return None
+    lr_pil = Image.open(io.BytesIO(lr_img_bytes)).convert("RGB")
+    sr_pil = _internal_upscale(lr_pil, generator, _lr_overlap)
+    if sr_pil:
+        buf = io.BytesIO()
+        sr_pil.save(buf, format="PNG")
+        return buf.getvalue()
+    return None
 
-
-# --- Post-Processing Functions ---
-
-def transfer_color_from_lr(sr_pil, lr_pil):
-    """
-    Transfers color from the LR image to the SR image using LAB color space.
-    Takes Luminance (details) from SR and Color (a*, b*) from LR.
-    """
-    lr_resized_pil = lr_pil.resize(sr_pil.size, Image.Resampling.LANCZOS)
-
-    sr_np_rgb = np.array(sr_pil)
-    lr_resized_np_rgb = np.array(lr_resized_pil)
-
-    if len(sr_np_rgb.shape) < 3:
-        sr_np_rgb = cv2.cvtColor(sr_np_rgb, cv2.COLOR_GRAY2RGB)
-    if len(lr_resized_np_rgb.shape) < 3:
-        lr_resized_np_rgb = cv2.cvtColor(lr_resized_np_rgb, cv2.COLOR_GRAY2RGB)
-
-    sr_np_bgr = cv2.cvtColor(sr_np_rgb, cv2.COLOR_RGB2BGR)
-    lr_resized_np_bgr = cv2.cvtColor(lr_resized_np_rgb, cv2.COLOR_RGB2BGR)
-
+# --- Post-Processing Internals ---
+def _internal_transfer_color(sr_pil, lr_pil):
     try:
-        sr_lab = cv2.cvtColor(sr_np_bgr, cv2.COLOR_BGR2LAB)
-        lr_resized_lab = cv2.cvtColor(lr_resized_np_bgr, cv2.COLOR_BGR2LAB)
-    except cv2.error as e:
-         st.error(f"OpenCV error during color space conversion: {e}")
-         st.warning("Skipping color transfer.")
-         return sr_pil
-
-
-    sr_L, sr_a, sr_b = cv2.split(sr_lab)
-    lr_resized_L, lr_resized_a, lr_resized_b = cv2.split(lr_resized_lab)
-
-    final_lab = cv2.merge((sr_L, lr_resized_a, lr_resized_b))
-
-    final_bgr = cv2.cvtColor(final_lab, cv2.COLOR_LAB2BGR)
-
-    final_rgb = cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB)
-
-    processed_pil = Image.fromarray(final_rgb)
-
-    return processed_pil
-
-
-def apply_sharpening(image_pil, radius, percent, threshold):
-    """Applies Unsharp Mask filter to a PIL image."""
-    if not isinstance(image_pil, Image.Image):
-         st.error("Sharpening function received invalid input (expected PIL Image).")
-         return image_pil
-    try:
-        return image_pil.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
+        if sr_pil.size[0] == 0 or sr_pil.size[1] == 0:
+            return sr_pil
+        lr_resized = lr_pil.resize(sr_pil.size, Image.Resampling.LANCZOS)
+        sr_rgb = np.array(sr_pil)
+        lr_rgb = np.array(lr_resized)
+        if len(sr_rgb.shape) < 3 or sr_rgb.shape[2] == 1:
+            sr_rgb = cv2.cvtColor(sr_rgb, cv2.COLOR_GRAY2RGB)
+        elif sr_rgb.shape[2] == 4:
+            sr_rgb = cv2.cvtColor(sr_rgb, cv2.COLOR_RGBA2RGB)
+        if len(lr_rgb.shape) < 3 or lr_rgb.shape[2] == 1:
+            lr_rgb = cv2.cvtColor(lr_rgb, cv2.COLOR_GRAY2RGB)
+        elif lr_rgb.shape[2] == 4:
+            lr_rgb = cv2.cvtColor(lr_rgb, cv2.COLOR_RGBA2RGB)
+        sr_bgr = cv2.cvtColor(sr_rgb, cv2.COLOR_RGB2BGR)
+        lr_bgr = cv2.cvtColor(lr_rgb, cv2.COLOR_RGB2BGR)
+        sr_lab = cv2.cvtColor(sr_bgr, cv2.COLOR_BGR2LAB)
+        lr_lab = cv2.cvtColor(lr_bgr, cv2.COLOR_BGR2LAB)
+        sr_L, _, _ = cv2.split(sr_lab)
+        _, lr_a, lr_b = cv2.split(lr_lab)
+        final_lab = cv2.merge((sr_L, lr_a, lr_b))
+        final_bgr = cv2.cvtColor(final_lab, cv2.COLOR_LAB2BGR)
+        return Image.fromarray(cv2.cvtColor(final_bgr, cv2.COLOR_BGR2RGB))
     except Exception as e:
-        st.error(f"Error applying sharpening: {e}")
-        return image_pil
+        st.error(f"Color transfer error: {e}. Skip.")
+        return sr_pil
 
+def _internal_apply_sharpen(img, r, p, t):
+    return img.filter(ImageFilter.UnsharpMask(r, p, t)) if isinstance(img, Image.Image) else img
 
-def apply_smoothing(image_pil, radius):
-    """Applies Gaussian Blur filter to a PIL image."""
-    if not isinstance(image_pil, Image.Image):
-         st.error("Smoothing function received invalid input (expected PIL Image).")
-         return image_pil
+def _internal_apply_smooth(img, r):
+    return img.filter(ImageFilter.GaussianBlur(r)) if isinstance(img, Image.Image) else img
+
+def _internal_apply_bc(img, b, c):
+    if not isinstance(img, Image.Image):
+        return img
     try:
-        return image_pil.filter(ImageFilter.GaussianBlur(radius=radius))
-    except Exception as e:
-        st.error(f"Error applying smoothing: {e}")
-        return image_pil
-
-def apply_brightness_contrast(image_pil, brightness_factor, contrast_factor):
-    """Adjusts brightness and contrast of a PIL image."""
-    if not isinstance(image_pil, Image.Image):
-        st.error("Brightness/Contrast function received invalid input (expected PIL Image).")
-        return image_pil
-    try:
-        img = image_pil
-        # Apply brightness if factor is not neutral (1.0)
-        if brightness_factor != 1.0:
-            enhancer_brightness = ImageEnhance.Brightness(img)
-            img = enhancer_brightness.enhance(brightness_factor)
-        # Apply contrast if factor is not neutral (1.0)
-        if contrast_factor != 1.0:
-            enhancer_contrast = ImageEnhance.Contrast(img)
-            img = enhancer_contrast.enhance(contrast_factor)
+        if b != 1.0:
+            img = ImageEnhance.Brightness(img).enhance(b)
+        if c != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(c)
         return img
     except Exception as e:
-        st.error(f"Error applying brightness/contrast: {e}")
-        return image_pil
+        st.error(f"B/C error: {e}. Skip.")
+        return img
 
+# --- Post-Processing (No Caching) ---
+def post_process_image(sr_img_bytes, lr_img_bytes, _apply_transfer, _sharpen_params, _smooth_params, _bc_params):
+    if sr_img_bytes is None:
+        return None, []
+    final_pil = Image.open(io.BytesIO(sr_img_bytes)).convert("RGB")
+    lr_pil = Image.open(io.BytesIO(lr_img_bytes)).convert("RGB")
+    steps = []
+    original_pil = final_pil
+    if _apply_transfer:
+        processed = _internal_transfer_color(final_pil, lr_pil)
+        final_pil, steps = (processed, steps + ["Color Transfer"]) if processed is not final_pil else (final_pil, steps)
+    if _sharpen_params['apply']:
+        processed = _internal_apply_sharpen(final_pil, _sharpen_params['radius'], _sharpen_params['percent'], _sharpen_params['threshold'])
+        final_pil, steps = (processed, steps + ["Sharpening"]) if processed is not final_pil else (final_pil, steps)
+    if _smooth_params['apply']:
+        processed = _internal_apply_smooth(final_pil, _smooth_params['radius'])
+        final_pil, steps = (processed, steps + ["Smoothing"]) if processed is not final_pil else (final_pil, steps)
+    if _bc_params['apply']:
+        processed = _internal_apply_bc(final_pil, _bc_params['brightness'], _bc_params['contrast'])
+    if _bc_params['apply'] and (processed is not final_pil or _bc_params['brightness'] != 1.0 or _bc_params['contrast'] != 1.0):
+        final_pil, steps = (processed, steps + ["Brightness/Contrast"])
+    if final_pil is original_pil and not steps:
+        return sr_img_bytes, []
+    buf = io.BytesIO()
+    final_pil.save(buf, format="PNG")
+    return buf.getvalue(), steps
 
-# --- Streamlit App ---
+# --- Model Change Callback ---
+def handle_model_change():
+    st.session_state.model_loaded_message_shown = ''
+    cached_upscale_image.clear()
+
+# --- Main App ---
 def main():
-    st.set_page_config(layout="wide", page_title="PixelSmith-SR")
     st.title("✨ PixelSmith-SR (2x Upscaler)")
-    st.markdown("Upscale low-resolution images by 2x using a ProGAN-based model, transfer original color, and apply optional enhancements.")
-    st.info(f"Using device: **{DEVICE.upper()}** | Upscale Factor: **{UPSCALE_FACTOR}x**")
+    st.markdown("Upscale low-resolution images by 2x using a selected GAN model, transfer original color, and apply optional enhancements.")
+    st.info(f"Using device: **{DEVICE.upper()}** | Upscale Factor: **{UPSCALE_FACTOR}x** | Patch Size: {LR_PATCH_SIZE}px")
+    gen = None
 
     with st.sidebar:
         st.header("⚙️ Controls")
-
-        st.subheader("Model Checkpoint")
-        checkpoint_path_input = st.text_input("Generator Checkpoint Path", DEFAULT_CHECKPOINT_PATH, key="ckpt_path", help="Path to the pre-trained generator .pth file.")
-        if not checkpoint_path_input:
-            st.warning("Please provide a path to the generator checkpoint file.")
-            st.stop()
-        elif not os.path.exists(checkpoint_path_input):
-             st.error(f"Checkpoint file not found at the specified path: `{checkpoint_path_input}`")
-             st.stop()
-        else:
-            gen = load_generator_model(checkpoint_path_input)
-
-
+        st.subheader("Model Selection")
+        available_names = list(MODEL_OPTIONS.keys())
+        current_sel = st.session_state.get("model_select", available_names[0])
+        selected_model = st.selectbox("Select Generator Model", options=available_names, key="model_select", index=available_names.index(current_sel), on_change=handle_model_change)
+        model_info = MODEL_OPTIONS[selected_model]
+        gen = load_selected_generator_model(selected_model, model_info["class"], model_info["path"], model_info["params"])
+        if gen is not None and st.session_state.model_loaded_message_shown != selected_model:
+            st.success(f"✅ {selected_model} loaded!")
+            st.session_state.model_loaded_message_shown = selected_model
         st.subheader("Image Upload")
-        uploaded_file = st.file_uploader("Choose a low-resolution image", type=["png", "jpg", "jpeg"], key="uploader")
-
+        uploaded_file = st.file_uploader("Choose image", type=["png", "jpg", "jpeg", "webp"], key="uploader")
         st.subheader("Upscaling Settings")
-        st.session_state.lr_overlap = st.slider(
-            "Patch Overlap (pixels)",
-            min_value=0, max_value=min(64, LR_PATCH_SIZE - 8),
-            value=st.session_state.lr_overlap,
-            step=4,
-            key="overlap_slider",
-            help=f"Adjusts the overlap between image patches (max {min(64, LR_PATCH_SIZE - 8)}px for {LR_PATCH_SIZE}px patches). Higher values can reduce seams but increase computation."
-        )
-
+        st.session_state.lr_overlap = st.slider("Patch Overlap (px)", 0, min(64, LR_PATCH_SIZE - 8), st.session_state.lr_overlap, 4, key="overlap_slider", help=f"Max rec: {min(64, LR_PATCH_SIZE - 8)}px")
         st.subheader("Post-Processing")
-        with st.expander("Color Transfer (Recommended)", expanded=True):
-             apply_color_transfer = st.checkbox("Transfer color from original LR image", value=True, key="color_transfer_cb", help="Merges details from the upscaled image with colors from the original image (resized). Helps maintain original color fidelity.")
-
+        with st.expander("Color Transfer", expanded=True):
+            apply_tf = st.checkbox("Transfer color", value=True, key="color_transfer_cb")
         with st.expander("🔪 Sharpening"):
-             st.session_state.sharpen = st.checkbox("Apply Sharpening", value=st.session_state.sharpen, key="sharpen_cb")
-             if st.session_state.sharpen:
-                st.session_state.sharpen_radius = st.slider("Radius", 0.1, 5.0, st.session_state.sharpen_radius, 0.1, key="sharp_radius_s", help="Controls the size of the edge area to affect.")
-                st.session_state.sharpen_percent = st.slider("Percent (Strength)", 50, 300, st.session_state.sharpen_percent, 10, key="sharp_perc_s", help="How much contrast to add at edges (strength).")
-                st.session_state.sharpen_threshold = st.slider("Threshold", 0, 20, st.session_state.sharpen_threshold, 1, key="sharp_thresh_s", help="Minimum brightness change to sharpen (ignores noise).")
-
-        with st.expander("💧 Smoothing (Anti-aliasing)"):
-             st.session_state.smooth = st.checkbox("Apply Gentle Smoothing", value=st.session_state.smooth, key="smooth_cb")
-             if st.session_state.smooth:
-                st.session_state.smooth_radius = st.slider("Radius (Strength)", 0.1, 3.0, st.session_state.smooth_radius, 0.1, key="smooth_radius_s", help="Controls the strength of the Gaussian blur for smoothing.")
-
-        # New Brightness/Contrast Expander
+            st.session_state.sharpen = st.checkbox("Apply Sharpen", value=st.session_state.sharpen, key="sharpen_cb")
+            if st.session_state.sharpen:
+                st.session_state.sharpen_radius = st.slider("Radius", 0.1, 5.0, st.session_state.sharpen_radius, 0.1, key="sharp_radius_s")
+                st.session_state.sharpen_percent = st.slider("Percent", 50, 300, st.session_state.sharpen_percent, 10, key="sharp_perc_s")
+                st.session_state.sharpen_threshold = st.slider("Threshold", 0, 20, st.session_state.sharpen_threshold, 1, key="sharp_thresh_s")
+        with st.expander("💧 Smoothing"):
+            st.session_state.smooth = st.checkbox("Apply Smoothing", value=st.session_state.smooth, key="smooth_cb")
+            if st.session_state.smooth:
+                st.session_state.smooth_radius = st.slider("Radius ", 0.1, 3.0, st.session_state.smooth_radius, 0.1, key="smooth_radius_s")
         with st.expander("☀️ Brightness & Contrast"):
-            st.session_state.apply_brightness_contrast = st.checkbox("Adjust Brightness/Contrast", value=st.session_state.apply_brightness_contrast, key="bc_cb")
-            if st.session_state.apply_brightness_contrast:
-                st.session_state.brightness_factor = st.slider(
-                    "Brightness Factor",
-                    min_value=0.5, max_value=1.5,
-                    value=st.session_state.brightness_factor,
-                    step=0.05,
-                    key="brightness_slider",
-                    help="Adjust overall brightness. 1.0 is original, <1.0 is darker, >1.0 is brighter."
-                )
-                st.session_state.contrast_factor = st.slider(
-                    "Contrast Factor",
-                    min_value=0.5, max_value=2.0,
-                    value=st.session_state.contrast_factor,
-                    step=0.05,
-                    key="contrast_slider",
-                    help="Adjust overall contrast. 1.0 is original, <1.0 reduces contrast, >1.0 increases contrast."
-                )
-
+            st.session_state.apply_bc = st.checkbox("Adjust B/C", value=st.session_state.apply_brightness_contrast, key="bc_cb")
+            if st.session_state.apply_bc:
+                st.session_state.brightness_factor = st.slider("Brightness", 0.5, 1.5, st.session_state.brightness_factor, 0.05, key="brightness_slider")
+                st.session_state.contrast_factor = st.slider("Contrast", 0.5, 2.0, st.session_state.contrast_factor, 0.05, key="contrast_slider")
 
     if uploaded_file is not None:
-        try:
-            lr_pil = Image.open(uploaded_file).convert("RGB")
-        except Exception as e:
-            st.error(f"Failed to open or process the uploaded image: {e}")
+        if gen is None:
+            st.error("Generator model not loaded.")
             st.stop()
-
-
+        try:
+            lr_bytes = uploaded_file.getvalue()
+            lr_pil = Image.open(io.BytesIO(lr_bytes)).convert("RGB")
+        except Exception as e:
+            st.error(f"Failed to load image: {e}")
+            st.stop()
         st.subheader("Image Results")
         col1, col2, col3 = st.columns(3)
-
         with col1:
-            st.write("Orignal")
-            st.image(lr_pil, caption="Original Low-Resolution Image", use_container_width=True)
-            st.write(f"Dimensions: {lr_pil.width}x{lr_pil.height}")
-
+            st.markdown("**Original Input**")
+            st.image(lr_pil, caption=f"Original ({lr_pil.width}x{lr_pil.height})", use_container_width=True)
+        sr_bytes = None
         sr_pil = None
         with col2:
-            st.write("Upscaling...")
-            with st.spinner(f"Upscaling image 2x (Overlap: {st.session_state.lr_overlap}px)..."):
-                 try:
-                    sr_pil = upscale_with_center_crop(lr_pil, gen, lr_overlap=st.session_state.lr_overlap)
-                    st.image(sr_pil, caption="Raw Upscaled Image (2x)", use_container_width=True)
-                    st.write(f"Dimensions: {sr_pil.width}x{sr_pil.height}")
-                 except Exception as e:
-                    st.error(f"An error occurred during upscaling:")
-                    st.exception(e)
-
-        final_pil = sr_pil
-        post_processing_steps = []
-
-        if final_pil:
-            with col3:
-                 st.write("Post-processing...")
-                 with st.spinner("Applying post-processing steps..."):
-
-                    if apply_color_transfer:
-                        try:
-                            final_pil = transfer_color_from_lr(final_pil, lr_pil)
-                            post_processing_steps.append("Color Transfer")
-                        except Exception as e:
-                            st.error("Error during Color Transfer:")
-                            st.exception(e)
-
-                    if st.session_state.sharpen:
-                        try:
-                            final_pil = apply_sharpening(final_pil,
-                                                         st.session_state.sharpen_radius,
-                                                         st.session_state.sharpen_percent,
-                                                         st.session_state.sharpen_threshold)
-                            post_processing_steps.append("Sharpening")
-                        except Exception as e:
-                            st.error("Error during Sharpening:")
-                            st.exception(e)
-
-                    if st.session_state.smooth:
-                         try:
-                            final_pil = apply_smoothing(final_pil, st.session_state.smooth_radius)
-                            post_processing_steps.append("Smoothing")
-                         except Exception as e:
-                             st.error("Error during Smoothing:")
-                             st.exception(e)
-
-                    # Apply Brightness/Contrast LAST
-                    if st.session_state.apply_brightness_contrast:
-                        try:
-                            final_pil = apply_brightness_contrast(final_pil,
-                                                                 st.session_state.brightness_factor,
-                                                                 st.session_state.contrast_factor)
-                            # Only add if factors are not 1.0 (neutral)? Or always add if checkbox is checked?
-                            # Let's always add if the box is checked, even if factors are 1.0, for clarity.
-                            post_processing_steps.append("Brightness/Contrast")
-                        except Exception as e:
-                            st.error("Error during Brightness/Contrast adjustment:")
-                            st.exception(e)
-
-
-                 caption_text = "Final Output"
-                 if post_processing_steps:
-                     caption_text += f" ({', '.join(post_processing_steps)})"
-                 elif final_pil is sr_pil: # Check if final is same object as sr_pil (means nothing applied)
-                     caption_text = "Raw Upscaled Image (No Post-Processing)"
-
-                 st.image(final_pil, caption=caption_text, use_container_width=True)
-                 st.write(f"Dimensions: {final_pil.width}x{final_pil.height}")
-
-            if final_pil:
-                buf = io.BytesIO()
-                final_pil.save(buf, format="PNG")
-                byte_im = buf.getvalue()
-                st.download_button(
-                    label="⬇️ Download Final Image",
-                    data=byte_im,
-                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_pixelsmith_final.png",
-                    mime="image/png",
-                    key="download_final"
-                )
-
-            # Offer raw download only if post-processing was actually applied
-            if sr_pil and final_pil is not sr_pil:
-                buf_raw = io.BytesIO()
-                sr_pil.save(buf_raw, format="PNG")
-                byte_im_raw = buf_raw.getvalue()
-                st.download_button(
-                    label="⬇️ Download Raw Upscaled Image",
-                    data=byte_im_raw,
-                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_pixelsmith_raw_sr.png",
-                    mime="image/png",
-                    key="download_raw"
-                )
-
-
+            st.markdown(f"**Raw Upscale ({selected_model})**")
+            with st.spinner(f"Upscaling ({UPSCALE_FACTOR}x)..."):
+                sr_bytes = cached_upscale_image(lr_bytes, selected_model, st.session_state.lr_overlap)
+            if sr_bytes:
+                try:
+                    sr_pil = Image.open(io.BytesIO(sr_bytes)).convert("RGB")
+                    st.image(sr_pil, caption=f"Raw Upscaled ({sr_pil.width}x{sr_pil.height})", use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed to display raw image: {e}")
+                    sr_pil = None
+            else:
+                st.error("Upscaling failed.")
+        final_bytes = None
+        final_pil = None
+        steps = []
+        with col3:
+            st.markdown("**Final Output**")
+            if sr_bytes:
+                sharp_p = {
+                    'apply': st.session_state.sharpen,
+                    'radius': st.session_state.sharpen_radius,
+                    'percent': st.session_state.sharpen_percent,
+                    'threshold': st.session_state.sharpen_threshold
+                }
+                smooth_p = {
+                    'apply': st.session_state.smooth,
+                    'radius': st.session_state.smooth_radius
+                }
+                bc_p = {
+                    'apply': st.session_state.apply_bc,
+                    'brightness': st.session_state.brightness_factor,
+                    'contrast': st.session_state.contrast_factor
+                }
+                with st.spinner("Applying post-processing..."):
+                    final_bytes, steps = post_process_image(sr_bytes, lr_bytes, apply_tf, sharp_p, smooth_p, bc_p)
+                if final_bytes:
+                    try:
+                        final_pil = Image.open(io.BytesIO(final_bytes)).convert("RGB")
+                        suffix = f"({final_pil.width}x{final_pil.height})"
+                        cap = f"Final (No Post-Processing) {suffix}" if not steps else f"Final ({', '.join(steps)}) {suffix}"
+                        st.image(final_pil, caption=cap, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Failed to display final image: {e}")
+                        final_pil = None
+                else:
+                    st.warning("Post-processing failed.")
+                    final_pil = None
+            else:
+                st.markdown("<p style='text-align: center; color: grey;'><i>Raw upscale needed.</i></p>", unsafe_allow_html=True)
+        st.markdown("---")
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            if final_bytes:
+                model_id = selected_model.replace(" ", "").lower()
+                fname = f"{os.path.splitext(uploaded_file.name)[0]}_pixelfinal_{model_id}.png"
+                st.download_button(label="⬇️ Download Final", data=final_bytes, file_name=fname, mime="image/png", key="dl_final", use_container_width=True)
+            else:
+                st.download_button(label="⬇️ Download Final", data=b'', disabled=True, use_container_width=True)
+        with dl2:
+            diff = sr_bytes and final_bytes and (sr_bytes != final_bytes)
+            if sr_bytes and diff:
+                model_id = selected_model.replace(" ", "").lower()
+                fname_raw = f"{os.path.splitext(uploaded_file.name)[0]}_pixelraw_{model_id}.png"
+                st.download_button(label="⬇️ Download Raw", data=sr_bytes, file_name=fname_raw, mime="image/png", key="dl_raw", use_container_width=True)
+            elif sr_bytes and not diff:
+                st.markdown("<p style='text-align:center;color:grey;'><i>Raw==Final</i></p>", unsafe_allow_html=True)
+            else:
+                st.download_button(label="⬇️ Download Raw", data=b'', disabled=True, use_container_width=True)
     else:
-        st.info("⬅️ Upload an image using the sidebar controls to begin.")
+        st.info("⬅️ Select model & upload image.")
+
+def create_dummy_checkpoint(p, cls, params):
+    if not cls:
+        return False
+    if not os.path.exists(p):
+        ctx = st.sidebar
+        ctx.warning(f"Chkpt '{os.path.basename(p)}' missing. Dummy.")
+        try:
+            os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
+            dummy = cls(**params).cpu()
+            state = {"gen_state": dummy.state_dict()}
+            torch.save(state, p)
+            return True
+        except Exception as e:
+            ctx.error(f"Dummy fail {os.path.basename(p)}:{e}")
+        try:
+            open(p, 'w').write("dummy")
+            return True
+        except Exception as fe:
+            ctx.error(f"Dummy file fail:{fe}")
+            return False
+    return False
 
 if __name__ == "__main__":
-    if not os.path.exists(DEFAULT_CHECKPOINT_PATH) and 'Generator' in globals():
-        st.sidebar.warning(f"Default checkpoint '{DEFAULT_CHECKPOINT_PATH}' not found. Creating a dummy file for testing UI structure. Replace with your actual model checkpoint.")
-        try:
-            os.makedirs(os.path.dirname(DEFAULT_CHECKPOINT_PATH) or '.', exist_ok=True)
-            dummy_gen = Generator(in_channels=3, img_channels=3)
-            dummy_state = {"gen_state": dummy_gen.state_dict()}
-            torch.save(dummy_state, DEFAULT_CHECKPOINT_PATH)
-            st.sidebar.info("Dummy checkpoint created.")
-        except Exception as e:
-             st.sidebar.error(f"Could not create dummy checkpoint: {e}")
-             try:
-                 with open(DEFAULT_CHECKPOINT_PATH, 'w') as f: f.write("dummy")
-             except Exception as fe:
-                 st.sidebar.error(f"Could not create dummy file: {fe}")
-
+    dummy_created = False
+    with st.sidebar:
+        st.markdown("---")
+        st.caption("Chkpt Status:")
+    for name, info in MODEL_OPTIONS.items():
+        if info.get('class', None):
+            if create_dummy_checkpoint(info['path'], info['class'], info['params']):
+                dummy_created = True
     main()
