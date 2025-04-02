@@ -339,17 +339,17 @@ def main():
         st.subheader("Post-Processing")
         with st.expander("Color Transfer", expanded=True):
             apply_tf = st.checkbox("Transfer color", value=True, key="color_transfer_cb")
-        with st.expander("🔪 Sharpening"):
+        with st.expander("Sharpening"):
             st.session_state.sharpen = st.checkbox("Apply Sharpen", value=st.session_state.sharpen, key="sharpen_cb")
             if st.session_state.sharpen:
                 st.session_state.sharpen_radius = st.slider("Radius", 0.1, 5.0, st.session_state.sharpen_radius, 0.1, key="sharp_radius_s")
                 st.session_state.sharpen_percent = st.slider("Percent", 50, 300, st.session_state.sharpen_percent, 10, key="sharp_perc_s")
                 st.session_state.sharpen_threshold = st.slider("Threshold", 0, 20, st.session_state.sharpen_threshold, 1, key="sharp_thresh_s")
-        with st.expander("💧 Smoothing"):
+        with st.expander("Smoothing"):
             st.session_state.smooth = st.checkbox("Apply Smoothing", value=st.session_state.smooth, key="smooth_cb")
             if st.session_state.smooth:
                 st.session_state.smooth_radius = st.slider("Radius ", 0.1, 3.0, st.session_state.smooth_radius, 0.1, key="smooth_radius_s")
-        with st.expander("☀️ Brightness & Contrast"):
+        with st.expander("Brightness & Contrast"):
             st.session_state.apply_bc = st.checkbox("Adjust B/C", value=st.session_state.apply_brightness_contrast, key="bc_cb")
             if st.session_state.apply_bc:
                 st.session_state.brightness_factor = st.slider("Brightness", 0.5, 1.5, st.session_state.brightness_factor, 0.05, key="brightness_slider")
@@ -468,9 +468,6 @@ def create_dummy_checkpoint(p, cls, params):
 
 if __name__ == "__main__":
     dummy_created = False
-    with st.sidebar:
-        st.markdown("---")
-        st.caption("Chkpt Status:")
     for name, info in MODEL_OPTIONS.items():
         if info.get('class', None):
             if create_dummy_checkpoint(info['path'], info['class'], info['params']):
